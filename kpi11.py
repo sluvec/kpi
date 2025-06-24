@@ -1521,9 +1521,9 @@ def main():
             fig_multi.update_layout(
                 title=f"{temporal_granularity} Performance Dashboard",
                 xaxis_title=f"{temporal_granularity} Period",
-                yaxis=dict(title="Revenue ($)", side="left", titlefont=dict(color="#1f77b4")),
-                yaxis2=dict(title="Customers", side="right", overlaying="y", titlefont=dict(color="#ff7f0e")),
-                yaxis3=dict(title="Cross-Sell Rate (%)", side="right", overlaying="y", position=0.95, titlefont=dict(color="#2ca02c")),
+                yaxis=dict(title="Revenue ($)", side="left", title=dict(font=dict(color="#1f77b4"))),
+                yaxis2=dict(title="Customers", side="right", overlaying="y", title=dict(font=dict(color="#ff7f0e"))),
+                yaxis3=dict(title="Cross-Sell Rate (%)", side="right", overlaying="y", position=0.95, title=dict(font=dict(color="#2ca02c"))),
                 height=500,
                 hovermode='x unified'
             )
