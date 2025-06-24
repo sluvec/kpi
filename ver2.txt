@@ -1,0 +1,285 @@
+# Workplace Services KPI Dashboard (v3.3 - Auto Column Mapping)
+# =======================================
+# Author: ChatGPT • June 2025
+# Corrections by: Google Gemini
+# Description: This version is tailored for the specific 'sale_data.xlsx' file format.
+# ---------------------------------------
+
+from __future__ import annotations
+import streamlit as st
+import pandas as pd
+import numpy as np
+import plotly.express as px
+import plotly.graph_objects as go
+from collections import Counter
+import networkx as nx
+
+# --------------------------------------------------------------
+#                 STATIC COLUMN CONFIGURATION
+# --------------------------------------------------------------
+# Nazwy kolumn z pliku Excel 'sale_data.xlsx'
+# Zamiast ręcznego mapowania, te wartości są używane bezpośrednio.
+C_ACCT = "Customer Name"
+C_LINE = "Category"
+C_YEAR = "Year"
+C_MONTH = "Month"
+C_VAL = "Sales"
+
+
+# --------------------------------------------------------------
+#                            Sidebar
+# --------------------------------------------------------------
+st.set_page_config(page_title="Workplace Services KPI Dashboard", layout="wide", initial_sidebar_state="expanded")
+
+st.sidebar.header("Data & Settings")
+file = st.sidebar.file_uploader("Upload 'sale_data.xlsx'", type=["xlsx","csv"])
+periodicity = st.sidebar.selectbox("Time aggregation", ["Monthly","Quarterly","Half-yearly","Yearly"], index=0)
+
+st.sidebar.info(f"""
+**Info:** This dashboard is pre-configured for a specific file format with the following columns:
+- `{C_ACCT}`
+- `{C_LINE}`
+- `{C_YEAR}`
+- `{C_MONTH}`
+- `{C_VAL}`
+""")
+
+
+# --------------------------------------------------------------
+#                       Helper functions
+# --------------------------------------------------------------
+@st.cache_data(show_spinner="Loading data...")
+def load_df(upload):
+    """Load data from uploaded file."""
+    if upload.name.endswith("csv"):
+        df = pd.read_csv(upload)
+    else:
+        df = pd.read_excel(upload, sheet_name=0)
+    return df
+
+@st.cache_data(show_spinner="Preparing data...")
+def add_date_cols(df: pd.DataFrame) -> pd.DataFrame:
+    """Add standardized date columns for grouping."""
+    df["Date"] = pd.to_datetime(df[C_YEAR].astype(str) + '-' + df[C_MONTH].astype(str) + '-01')
+    df["YM"] = df["Date"].dt.to_period("M").astype(str)
+    df["Q"]  = df["Date"].dt.to_period("Q").astype(str)
+    df["H"]  = df["Date"].dt.year.astype(str) + "-H" + ((df["Date"].dt.quarter + 1)//2).astype(str)
+    df["Y"]  = df["Date"].dt.year.astype(str)
+    return df
+
+# --------- KPI engine ---------
+@st.cache_data(show_spinner="Calculating KPIs...")
+def build_kpis(_df: pd.DataFrame):
+    """Return monthly portfolio KPIs & business-line board."""
+    Acct, Line, Val = "Account", "BusinessLine", "Revenue"
+
+    breadth = _df.groupby(["YM", Acct]).agg(
+        Breadth=(Line,"nunique"), AccRev=(Val,"sum")
+    ).reset_index()
+
+    monthly = breadth.groupby("YM").agg(
+        ActiveAccounts=(Acct,"nunique"), TotalRevenue=("AccRev","sum"), AvgBreadth=("Breadth","mean")
+    ).reset_index()
+    if not monthly.empty:
+        monthly["rwABI"] = breadth.groupby("YM").apply(lambda g: np.average(g.Breadth, weights=g.AccRev) if not g.empty and g.AccRev.sum() > 0 else 0).values
+        multi_service_counts = breadth[breadth.Breadth>=2].groupby("YM")[Acct].nunique()
+        monthly = monthly.set_index('YM').join(multi_service_counts.rename('MSP_count')).fillna(0).reset_index()
+        monthly['MSP'] = monthly['MSP_count'] / monthly['ActiveAccounts']
+        monthly["AMRA"] = monthly.TotalRevenue / monthly.ActiveAccounts
+    
+    last12 = _df[_df["Date"] >= _df["Date"].max() - pd.DateOffset(months=11)]
+    bl_board = last12.groupby(Line).agg(
+        Revenue_total=(Val,"sum"), Accounts=(Acct,"nunique")
+    ).reset_index()
+
+    first_line = _df.sort_values("Date").groupby(Acct)[Line].first().value_counts()
+    bl_board["EntryRatio"] = bl_board[Line].map(first_line) / _df[Acct].nunique()
+    
+    bl_board.sort_values("EntryRatio", ascending=False, inplace=True, na_position='last')
+    return monthly.sort_values("YM"), bl_board
+
+def get_customer_journeys(_df: pd.DataFrame):
+    """Extracts first/last purchase and purchase sequences."""
+    Acct, Line = "Account", "BusinessLine"
+    sorted_df = _df.sort_values(["Date", Acct])
+    
+    first_purchases = sorted_df.groupby(Acct)[Line].first().value_counts()
+    last_purchases = sorted_df.groupby(Acct)[Line].last().value_counts()
+    
+    sequences = sorted_df.groupby(Acct)[Line].apply(list)
+    transitions = Counter()
+    for seq in sequences:
+        transitions.update(zip(seq, seq[1:]))
+        
+    return first_purchases, last_purchases, transitions
+
+def create_network_graph(transitions, node_weights, title):
+    """Creates a Plotly network graph from transitions."""
+    G = nx.DiGraph()
+    for (src, tgt), weight in transitions.items():
+        G.add_edge(src, tgt, weight=weight)
+    
+    if not G.nodes:
+        return go.Figure()
+
+    pos = nx.spring_layout(G, k=0.8, iterations=50, seed=42)
+
+    edge_x, edge_y = [], []
+    for edge in G.edges():
+        x0, y0 = pos[edge[0]]
+        x1, y1 = pos[edge[1]]
+        edge_x.extend([x0, x1, None])
+        edge_y.extend([y0, y1, None])
+
+    edge_trace = go.Scatter(
+        x=edge_x, y=edge_y,
+        line=dict(width=0.5, color='#888'),
+        hoverinfo='none',
+        mode='lines')
+
+    node_x, node_y, node_text, node_size = [], [], [], []
+    node_weights_max = node_weights.max() if not node_weights.empty else 1
+    for node in G.nodes():
+        x, y = pos[node]
+        node_x.append(x)
+        node_y.append(y)
+        weight = node_weights.get(node, 0)
+        node_text.append(f"{node}<br>Count: {weight}")
+        node_size.append(15 + 50 * (weight / node_weights_max))
+
+    node_trace = go.Scatter(
+        x=node_x, y=node_y,
+        mode='markers+text',
+        hoverinfo='text',
+        text=[f"<b>{n}</b>" for n in G.nodes()],
+        textposition="top center",
+        marker=dict(
+            showscale=True,
+            colorscale='YlGnBu',
+            size=node_size,
+            color=[node_weights.get(n, 0) for n in G.nodes()],
+            colorbar=dict(
+                thickness=15, title="Node Weight", xanchor='left', titleside='right'
+            )
+        )
+    )
+
+    fig = go.Figure(data=[edge_trace, node_trace],
+             layout=go.Layout(
+                title=title, titlefont_size=16, showlegend=False, hovermode='closest',
+                margin=dict(b=20,l=5,r=5,t=40),
+                annotations=[ dict(
+                    ax=pos[edge[0]][0], ay=pos[edge[0]][1], axref='x', ayref='y',
+                    x=pos[edge[1]][0]*0.8 + pos[edge[0]][0]*0.2, y=pos[edge[1]][1]*0.8 + pos[edge[0]][1]*0.2, xref='x', yref='y',
+                    showarrow=True, arrowhead=2, arrowsize=2, arrowwidth=1
+                    ) for edge in G.edges()],
+                xaxis=dict(showgrid=False, zeroline=False, showticklabels=False),
+                yaxis=dict(showgrid=False, zeroline=False, showticklabels=False))
+                )
+    return fig
+
+
+# --------------------------------------------------------------
+#                            App
+# --------------------------------------------------------------
+if file:
+    raw = load_df(file)
+    
+    # Walidacja, czy wymagane kolumny istnieją w pliku
+    required_cols = {C_ACCT, C_LINE, C_YEAR, C_MONTH, C_VAL}
+    if not required_cols.issubset(raw.columns):
+        st.error(f"Błąd: Nie znaleziono wszystkich wymaganych kolumn w pliku. Upewnij się, że plik zawiera: {', '.join(required_cols)}")
+    else:
+        # Przetwarzanie danych
+        df_with_dates = add_date_cols(raw)
+        
+        # Standaryzacja nazw kolumn na potrzeby reszty skryptu
+        df = df_with_dates.rename(columns={
+            C_ACCT: "Account", C_LINE: "BusinessLine", C_YEAR: "Year", C_MONTH: "Month", C_VAL: "Revenue"
+        })
+        
+        # Oczyszczanie danych
+        df['Revenue'] = pd.to_numeric(df['Revenue'], errors='coerce')
+        df.dropna(subset=['Revenue', 'Account', 'BusinessLine'], inplace=True)
+
+        st.sidebar.success(f"Loaded and processed {len(df):,} rows ✅")
+
+        monthly, board = build_kpis(df)
+
+        # Tabs
+        tab_port, tab_lines, tab_journeys = st.tabs(["Portfolio KPIs", "Business-Line Board", "Customer Journeys"])
+
+        with tab_port:
+            st.subheader("Portfolio KPIs")
+            if not monthly.empty:
+                latest = monthly.iloc[-1]
+                cols = st.columns(4)
+                cols[0].metric("Total Revenue (last month)", f"${latest['TotalRevenue']:,.0f}")
+                cols[1].metric("Active Accounts", f"{latest['ActiveAccounts']:,}")
+                cols[2].metric("Avg. Basket Index (ABI)", f"{latest['AvgBreadth']:.2f}")
+                cols[3].metric("% Multi-Service Penetration", f"{latest['MSP']:.1%}")
+            
+        with tab_lines:
+            st.subheader("Business-Line Board (last 12 months)")
+            st.dataframe(board.style.format({
+                'Revenue_total':'${:,.0f}','EntryRatio':'{:.1%}', 'Accounts': '{:,}'
+            }), use_container_width=True)
+
+            st.markdown("### Cross-Sell Lift Matrix")
+            st.info("""**Jak czytać ten wykres?** Wartość '1.5' w komórce (Y, X) oznacza, że klienci, którzy kupili produkt X, są o 50% bardziej skłonni kupić produkt Y niż przeciętny klient. Wartości > 1 oznaczają synergię.""")
+            
+            pivot = df.assign(flag=1).pivot_table(index="Account", columns="BusinessLine", values="flag", aggfunc="max", fill_value=0)
+            
+            prob_b = pivot.sum() / len(pivot)
+            prob_a_and_b = (pivot.T @ pivot) / len(pivot)
+            prob_b_conditional_a = prob_a_and_b.divide(prob_b, axis='index')
+            lift = prob_b_conditional_a.divide(prob_b, axis='columns')
+            np.fill_diagonal(lift.values, np.nan) 
+
+            fig3 = px.imshow(lift, text_auto=".2f", aspect="auto",
+                             color_continuous_scale="RdYlGn", origin='lower',
+                             labels=dict(x="Then Buy...", y="If They Have...", color="Lift"),
+                             title="Cross-Sell Lift: Likelihood to Buy B Given A")
+            fig3.update_layout(height=600)
+            st.plotly_chart(fig3, use_container_width=True)
+
+        with tab_journeys:
+            st.header("Customer Purchase Journeys")
+            first_purchases, last_purchases, transitions = get_customer_journeys(df)
+            
+            st.subheader("Network of Customer Flow")
+            st.info("Wykresy pokazują, jak klienci przechodzą między liniami biznesowymi. Rozmiar kółka oznacza, jak często dana linia była punktem startowym lub końcowym.")
+
+            col1, col2 = st.columns(2)
+            with col1:
+                fig_net_first = create_network_graph(transitions, first_purchases, "Source Lines (Weighted by First Purchase)")
+                st.plotly_chart(fig_net_first, use_container_width=True)
+            with col2:
+                fig_net_last = create_network_graph(transitions, last_purchases, "Destination Lines (Weighted by Last Purchase)")
+                st.plotly_chart(fig_net_last, use_container_width=True)
+
+            st.subheader("Top 10 Most Common Purchase Paths (Sankey Diagram)")
+            st.info("Uproszczony wykres pokazujący 10 najczęstszych sekwencji zakupowych.")
+            if transitions:
+                top_10_transitions = transitions.most_common(10)
+                source_nodes, target_nodes, values = [], [], []
+                for (src, tgt), val in top_10_transitions:
+                    source_nodes.append(src)
+                    target_nodes.append(tgt)
+                    values.append(val)
+
+                all_nodes = sorted(list(set(source_nodes + target_nodes)))
+                node_map = {node: i for i, node in enumerate(all_nodes)}
+
+                sankey_fig = go.Figure(go.Sankey(
+                    node=dict(label=all_nodes, pad=25, thickness=20, color='royalblue'),
+                    link=dict(
+                        source=[node_map[s] for s in source_nodes],
+                        target=[node_map[t] for t in target_nodes],
+                        value=values
+                    )))
+                sankey_fig.update_layout(title_text="Top 10 Transitions", height=500)
+                st.plotly_chart(sankey_fig, use_container_width=True)
+
+else:
+    st.info("👋 Welcome! Please upload your 'sale_data.xlsx' file to start.")
