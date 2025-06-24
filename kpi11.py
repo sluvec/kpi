@@ -622,6 +622,7 @@ def create_cohort_retention_chart(cohort_df):
         # Convert Period objects to strings for JSON serialization
         cohort_df_copy = cohort_df.copy()
         cohort_df_copy['CohortMonth'] = cohort_df_copy['CohortMonth'].astype(str)
+        cohort_df_copy['Period'] = cohort_df_copy['Period'].astype(str)
         
         cohort_pivot = cohort_df_copy.pivot(index='CohortMonth', columns='Period', values='RetentionRate')
         
